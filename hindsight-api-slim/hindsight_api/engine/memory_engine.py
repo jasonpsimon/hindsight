@@ -8966,11 +8966,20 @@ class MemoryEngine(MemoryEngineInterface):
             min_scores is not None
             and min_scores.reranker is not None
             and reranking == "cross_encoder"
-            and self._cross_encoder_reranker.cross_encoder.primary_provider_name in RANK_SCORE_PROVIDERS
+            and bool(
+                getattr(
+                    self._cross_encoder_reranker.cross_encoder,
+                    "score_provider_names",
+                    frozenset({self._cross_encoder_reranker.cross_encoder.primary_provider_name}),
+                )
+                & RANK_SCORE_PROVIDERS
+            )
         ):
             from hindsight_api.extensions.operation_validator import OperationValidationError
 
-            provider = self._cross_encoder_reranker.cross_encoder.primary_provider_name
+            encoder = self._cross_encoder_reranker.cross_encoder
+            providers = getattr(encoder, "score_provider_names", frozenset({encoder.primary_provider_name}))
+            provider = ", ".join(sorted(providers & RANK_SCORE_PROVIDERS))
             raise OperationValidationError(
                 f"min_scores.reranker is not supported with the '{provider}' reranker: its scores are rank "
                 "positions within each result set, so a floor would keep a fixed share of results regardless "
@@ -9897,6 +9906,7 @@ class MemoryEngine(MemoryEngineInterface):
             # Provider that produced scored_results for THIS call. None until a
             # cross-encoder rerank returns; rrf/interleave never consult it.
             served_provider: str | None = None
+            reranker_scores_ordinal = False
             pre_filtered_count = 0
             rerank_kind = "cross-encoder"
             try:
@@ -9979,6 +9989,14 @@ class MemoryEngine(MemoryEngineInterface):
                     # cross_encoder.provider_name here: on a failover chain that
                     # property follows a cursor other requests can move.
                     served_provider = reranked.provider_name
+                    # Native predictions can declare ordinal scores even for "local",
+                    # or pointwise scores under a rank-looking provider name. Keep the
+                    # declaration from this call, never a shared provider cursor.
+                    reranker_scores_ordinal = (
+                        reranked.score_kind == "ordinal"
+                        if reranked.score_kind is not None
+                        else served_provider in RANK_SCORE_PROVIDERS
+                    )
                 else:
                     # "rrf" / "interleave": skip the cross-encoder and keep the fusion order
                     # (rrf_score is descending by fusion position for both). The cross-encoder
@@ -10073,9 +10091,10 @@ class MemoryEngine(MemoryEngineInterface):
             # (a clearly-relevant match can score ~0.001 while its *ranking* is right).
             min_reranker = min_scores.reranker if min_scores else None
             min_final = min_scores.final if min_scores else None
-            if min_reranker is not None and served_provider in RANK_SCORE_PROVIDERS:
+            if min_reranker is not None and reranker_scores_ordinal:
                 # Recall entry rejects this floor when the primary scores by rank; getting
-                # here means the chain failed over to such a member. Its scores are rank
+                # here means the prediction declared ordinal scores or the chain failed
+                # over to a legacy rank-scoring member. Its scores are rank
                 # positions, so the floor would only keep a fixed share of the pool (#4901).
                 # Skipped rather than rejected: the caller did nothing wrong, the primary failed.
                 log_buffer.append(f"  [4.9] min_scores.reranker ignored: '{served_provider}' scores by rank")
@@ -10540,12 +10559,10 @@ class MemoryEngine(MemoryEngineInterface):
             # Build per-result scores (final/reranker/semantic/text) keyed by id.
             # reranker is None when the configured reranker is a passthrough (rrf /
             # interleave modes, or the RRFPassthroughCrossEncoder) or scores by rank
-            # position (RANK_SCORE_PROVIDERS, #4901), since its
+            # position (an explicit ordinal kind, or legacy RANK_SCORE_PROVIDERS, #4901), since its
             # cross_encoder_score_normalized is then a rank-derived placeholder, not a
             # true relevance score.
-            reranker_passthrough = (
-                (reranking != "cross_encoder") or served_provider == "rrf" or served_provider in RANK_SCORE_PROVIDERS
-            )
+            reranker_passthrough = (reranking != "cross_encoder") or served_provider == "rrf" or reranker_scores_ordinal
             scores_by_id: dict[str, RecallScores] = {
                 sr.id: RecallScores(
                     final=sr.weight,

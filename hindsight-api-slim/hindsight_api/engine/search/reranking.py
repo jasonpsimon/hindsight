@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..cross_encoder import RerankTimeoutError, _served_provider
+from ..rerank_result import ScoreKind
 from .decision_reranker import PROVIDER_NAME as DECISION_MODEL_RERANKER
 from .decision_reranker import DecisionModelReranker, rerank_shared_context
 from .types import MergedCandidate, ScoredResult
@@ -27,6 +28,9 @@ class RerankResult:
 
     results: list[ScoredResult]
     provider_name: str | None
+    # None preserves provider-name semantics for legacy list predictors. Structured
+    # predictions declare the kind for this request, independent of provider names.
+    score_kind: ScoreKind | None = None
 
 
 UTC = timezone.utc
@@ -424,6 +428,12 @@ class CrossEncoderReranker:
                 doc_text = f"[Date: {date_readable} ({date_iso})] {doc_text}"
 
             pairs.append([query, doc_text])
+
+        # Structured predictions preserve request-local survival masks and score kinds.
+        if any("predict_structured" in cls.__dict__ for cls in type(self.cross_encoder).mro()):
+            from .reranking_pipeline import rerank_with_structured
+
+            return await rerank_with_structured(self.cross_encoder, [(a, b) for a, b in pairs], candidates)
 
         # Get cross-encoder scores. A failover chain records the member that
         # served this task; read it before anything else on the chain can move.

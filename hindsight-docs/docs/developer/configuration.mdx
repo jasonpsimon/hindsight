@@ -1261,6 +1261,74 @@ CUDA and Intel XPU are unaffected and still auto-select.
 
 :::
 
+#### Progressive reranking pipeline
+
+A pipeline runs every stage in order, on only the preceding stage's survivors.
+Survivors are sorted by descending score before the next stage, including when
+no limit is set. Ties preserve stage input order. This differs from failover,
+which tries another provider only after a failure. Pipeline settings are static,
+not bank or tenant overrides.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_RERANKER_PIPELINE` | Comma-separated providers, at least two. Same provider names as `HINDSIGHT_API_RERANKER_PROVIDER`. Empty or unset disables the pipeline. | Unset |
+| `HINDSIGHT_API_RERANKER_PASS{i}_LIMIT` | Maximum survivors after pass `i`, numbered from 1. Positive integer. | All survivors |
+| `HINDSIGHT_API_RERANKER_PASS{i}_<SETTING>` | Override a member setting, such as `PROVIDER`, `LOCAL_MODEL`, `COHERE_API_KEY`, or `TYPESAFE_BASE_URL`. Absent or blank values inherit the completed primary config. | Primary setting |
+| `HINDSIGHT_API_RERANKER_PASS{i}_MAX_TOKENS_PER_CANDIDATE` | Per-document token cap for this pass. Each pass truncates its own copy of the original documents. The deprecated `PASS{i}_LITELLM_MAX_TOKENS_PER_DOC` alias applies only when the generic setting is absent or blank. | Primary cap |
+
+```bash
+HINDSIGHT_API_RERANKER_PIPELINE=local,typesafe
+HINDSIGHT_API_RERANKER_PASS1_LIMIT=20
+HINDSIGHT_API_RERANKER_PASS2_LIMIT=5
+HINDSIGHT_API_RERANKER_PASS2_TYPESAFE_API_KEY=your-typesafe-api-key
+```
+
+Do not combine a pipeline with indexed `HINDSIGHT_API_RERANKER_{n}_*` failover
+members. The factory rejects that combination before constructing providers.
+The shorter `HINDSIGHT_RERANKER_PASS{i}_*` names are not supported. Retry budgets
+and bank attribution remain global. Each backend's public prediction method owns
+its truncation and retries, with no additional retry loop around the pipeline.
+
+A keep mask or pass limit removes candidates permanently. Zero and negative
+ordinary scores do not remove them. Local logits receive sigmoid; TypeSafe rank
+scores and remote pointwise scores pass through. Jina MLX cosine similarity also
+passes through unchanged, including negative values. FlashRank real scalars are
+converted to Python floats without applying another sigmoid. The primary-only
+route still returns the original provider instance and retains its score-range
+inference.
+
+Unscored survivors follow scored survivors in stable stage input order. A total
+timeout restores the last usable scores, but never restores candidates removed
+by a keep mask or limit. The timed-out pass applies its limit to its own input
+order before restoration. Restored scores retain their provider and score kind;
+timeout duration and model name come from the timed-out final pass, including
+zero durations, empty names and absent values. Other errors propagate.
+
+Native structured providers may return optional `survivor_order` metadata, a list
+of original-input indices containing every kept candidate exactly once. The
+pipeline maps that order through each stage and carries it through failover and
+timeout restoration to recall. Ties and unscored tails retain that order at the
+final caller, not the original retrieval order. Providers that omit the metadata
+keep their input-order tie behavior; legacy providers require no changes.
+
+Recall rejects `min_scores.reranker` if any pipeline pass scores by rank, since
+that pass may supply restored scores after a later timeout. Failover retains its
+primary-provider validation and skips the floor if a rank-scoring fallback serves
+the request. Returned rank scores are not published as relevance scores.
+
+For structured predictions, recall uses the score kind returned by that request,
+including a restored prediction after a total timeout. An `ordinal` prediction
+skips `min_scores.reranker` and returns `scores.reranker=null`, even when its
+provider is named `local`. Explicit `calibrated` and `logit` predictions remain
+pointwise scores even under a rank-associated provider name. These declarations
+do not bypass the configured-primary or pipeline-pass validation above, which
+runs before prediction. Legacy list predictors retain provider-name semantics.
+`min_scores.final` still filters the final ranking score for ordinal predictions.
+
+Missing pipeline credentials currently use indexed member error names, such as
+`HINDSIGHT_API_RERANKER_2_TYPESAFE_API_KEY`. Set the corresponding
+`HINDSIGHT_API_RERANKER_PASS2_TYPESAFE_API_KEY` for a pipeline.
+
 #### Reranker failover chain
 
 Reranking is a refinement stage, but by default a reranker that is unreachable takes

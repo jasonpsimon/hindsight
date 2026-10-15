@@ -52,6 +52,14 @@ If your shell exports `PYTEST_ADDOPTS=-n ...`, clear it for this suite —
 `pytest-xdist` is not installed here, and the session-scoped server makes it
 pointless anyway.
 
+For a disposable external PostgreSQL with pgvector, set
+`HINDSIGHT_SYSTEM_TEST_DATABASE_URL` to its connection string. Never point this at
+a working database: the fixtures delete test banks. To use an already installed
+project-local API rather than `uv run`, set `HINDSIGHT_SYSTEM_TEST_BIN_DIR` to that
+environment's `bin` directory. Both overrides are opt-in; normal runs still use
+the suite's embedded database and source API. `HINDSIGHT_SYSTEM_TEST_RESOURCE_LEDGER`
+optionally records API/worker process identities and teardown events as JSONL.
+
 **Background work is off by default.** Observation extraction and auto
 consolidation run in the worker after a retain returns, so their LLM calls would
 land at a moment no test controls — after the assertions, sometimes after the

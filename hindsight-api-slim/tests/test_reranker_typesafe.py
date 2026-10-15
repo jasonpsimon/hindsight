@@ -144,25 +144,35 @@ class TestRanking:
 
     @pytest.mark.asyncio
     async def test_candidates_are_the_options_and_the_query_is_the_question(self):
-        encoder, session = _encoder({"c0": 1.0})
-        await encoder._predict([("who paid?", "Alice paid the bill")])
+        encoder, session = _encoder({"c0": 0.9, "c1": 0.1})
+        scores = await encoder._predict([("who paid?", "Alice paid the bill"), ("who paid?", "Bob paid the bill")])
 
+        assert len(session.rank_requests) == 1
+        assert len(session.cut_requests) == 0
+        assert len(scores) == 2
+        assert scores[0] > scores[1]
         body = session.rank_requests[0]
         assert body["model"] == "jev-latest"
         assert "who paid?" in body["state"]
         question = body["questions"]["rank"]
         assert question["type"] == "choice"
-        assert question["criteria"] == {"c0": "Alice paid the bill"}
+        assert question["criteria"] == {"c0": "Alice paid the bill", "c1": "Bob paid the bill"}
 
     @pytest.mark.asyncio
     async def test_each_query_is_ranked_in_its_own_pool(self):
         """Two queries cannot share a ranking: a Choice ranks against one question."""
         encoder, session = _encoder({"c0": 0.9, "c1": 0.1})
-        scores = await encoder._predict([("a", "doc-a"), ("b", "doc-b"), ("a", "doc-a2")])
+        scores = await encoder._predict([("a", "doc-a"), ("b", "doc-b"), ("a", "doc-a2"), ("b", "doc-b2")])
 
         assert len(session.rank_requests) == 2
-        assert len(scores) == 3
+        assert len(session.cut_requests) == 0
+        assert len(scores) == 4
         assert scores[0] > scores[2], "query a's own two candidates keep their order"
+        assert scores[1] > scores[3], "query b's own two candidates keep their order"
+        pools = {"Question: a": {"c0": "doc-a", "c1": "doc-a2"}, "Question: b": {"c0": "doc-b", "c1": "doc-b2"}}
+        assert {body["state"] for body in session.rank_requests} == set(pools)
+        for body in session.rank_requests:
+            assert body["questions"]["rank"]["criteria"] == pools[body["state"]]
 
     @pytest.mark.asyncio
     async def test_empty_pairs_make_no_request(self):
@@ -277,9 +287,11 @@ class TestFactory:
 
     @pytest.mark.asyncio
     async def test_base_url_is_honoured(self):
-        encoder, session = _encoder({"c0": 1.0}, base_url="https://proxy.example.com/")
-        await encoder._predict([("q", "doc")])
+        encoder, session = _encoder({"c0": 0.9, "c1": 0.1}, base_url="https://proxy.example.com/")
+        scores = await encoder._predict([("q", "doc"), ("q", "doc2")])
         assert session.urls == ["https://proxy.example.com/v1/systemone"]
+        assert scores[0] > scores[1]
+        assert session.rank_requests[0]["questions"]["rank"]["criteria"] == {"c0": "doc", "c1": "doc2"}
 
 
 class TestTokenBudgetingAndOrder:

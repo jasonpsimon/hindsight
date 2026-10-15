@@ -14,6 +14,7 @@ import time
 import warnings
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
+from numbers import Real
 from typing import Any, cast
 
 import aiohttp
@@ -57,6 +58,7 @@ from .local_device import (
     select_local_device,
 )
 from .remote_retry import RetryPolicy, acall_with_retry
+from .rerank_result import ScoreKind
 from .tei_retry import TEI_KEEPALIVE_EXPIRY_SECONDS, is_retryable_tei_transport_error, tei_retry_delay
 from .token_encoding import count_tokens, truncate_to_tokens
 
@@ -89,6 +91,11 @@ class RerankTimeoutError(Exception):
     keeps those candidates in their pre-rerank (RRF) order behind the scored ones,
     so a mis-sized local model degrades the ordering instead of never returning.
     """
+
+    # Optional structured metadata survives a public list-API timeout round trip.
+    keep: list[bool] | None = None
+    survivor_order: list[int] | None = None
+    score_kind: ScoreKind | None = None
 
     def __init__(self, scores: list[float | None], timeout: float, model_name: str):
         self.scores = scores
@@ -126,6 +133,16 @@ class CrossEncoderModel(ABC):
     def primary_provider_name(self) -> str:
         """The provider that serves requests while nothing has failed over."""
         return self.provider_name
+
+    @property
+    def score_provider_names(self) -> frozenset[str]:
+        """Normal score providers to validate before recall starts.
+
+        Failover retains the primary's policy: recall checks the actual served
+        provider again after prediction and skips the floor on rank fallback.
+        Progressive pipelines override this because earlier scores can be restored.
+        """
+        return frozenset({self.primary_provider_name})
 
     @abstractmethod
     async def initialize(self) -> None:
@@ -1106,6 +1123,9 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
 
     async def _rank_once(self, query: str, docs: list[str], indices: list[int]) -> list[int]:
         """Rank one group of candidates, returning their indices best first."""
+        # Choice requires two options; relevance pruning still runs in _rank_group.
+        if len(indices) < 2:
+            return list(indices)
         body = {
             "state": f"Question: {query}",
             "model": self.model,
@@ -1489,8 +1509,12 @@ class FlashRankCrossEncoder(CrossEncoderModel):
                     for result in results:
                         local_idx = result["id"]
                         score = result["score"]
+                        # FlashRank returns NumPy real scalars; reject coercible
+                        # strings and booleans rather than masking bad scores.
+                        if isinstance(score, bool) or not isinstance(score, Real):
+                            raise ValueError(f"flashrank: expected real score, got {type(score).__name__}")
                         global_idx = global_indices[start + local_idx]
-                        all_scores[global_idx] = score
+                        all_scores[global_idx] = float(score)
 
             return all_scores
         finally:
@@ -2400,8 +2424,6 @@ def create_cross_encoder_from_env() -> CrossEncoderModel:
         Configured CrossEncoderModel instance
     """
     from ..config import get_config
+    from .factory_pipeline import build_encoder_from_config
 
-    chain = get_config().reranker_chain()
-    if len(chain) == 1:
-        return create_cross_encoder(chain[0])
-    return MultiCrossEncoder([create_cross_encoder(member) for member in chain])
+    return build_encoder_from_config(get_config())

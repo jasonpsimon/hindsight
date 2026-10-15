@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import sys
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Union, cast
 
@@ -2827,6 +2827,78 @@ class RerankerMemberConfig:
         return f"HINDSIGHT_API_RERANKER_{infix}{suffix}"
 
 
+ENV_RERANKER_PIPELINE = "HINDSIGHT_API_RERANKER_PIPELINE"
+DEFAULT_RERANKER_PIPELINE = None
+
+
+@dataclass
+class RerankerPipelineStage:
+    """One static progressive stage, separate from indexed failover members."""
+
+    provider: str
+    limit: int | None
+    member: RerankerMemberConfig
+
+
+def build_pipeline_stage_member(stage_index: int, provider: str, primary: RerankerMemberConfig) -> RerankerMemberConfig:
+    """Clone the real member, including subclass fields, with explicit PASS overrides."""
+    base = f"HINDSIGHT_API_RERANKER_PASS{stage_index}_"
+    overrides: dict[str, Any] = {"index": stage_index, "provider": provider}
+    for member_field in fields(primary):
+        if member_field.name == "index":
+            continue
+        name = base + member_field.name.upper()
+        raw = os.getenv(name)
+        # Match the global generic-cap/deprecated-alias precedence. Blank values
+        # inherit unless the alias supplies a nonblank override.
+        if member_field.name == "max_tokens_per_candidate" and (raw is None or not raw.strip()):
+            alias = os.getenv(base + "LITELLM_MAX_TOKENS_PER_DOC")
+            if alias is not None and alias.strip():
+                raw = alias
+                name = base + "LITELLM_MAX_TOKENS_PER_DOC"
+        if raw is None or not raw.strip():
+            continue
+        raw = raw.strip()
+        current = getattr(primary, member_field.name)
+        try:
+            if isinstance(current, bool):
+                value = raw.lower() in ("1", "true", "yes", "on")
+            elif isinstance(current, int) or member_field.name == "max_tokens_per_candidate":
+                value = int(raw)
+            elif isinstance(current, float):
+                value = float(raw)
+            else:
+                value = raw
+        except ValueError as exc:
+            raise ValueError(f"Invalid {name}: {raw!r}") from exc
+        overrides[member_field.name] = value
+    return replace(primary, **overrides)
+
+
+def parse_reranker_pipeline(primary: RerankerMemberConfig) -> list[RerankerPipelineStage] | None:
+    raw = os.getenv(ENV_RERANKER_PIPELINE)
+    if not raw or not raw.strip():
+        return DEFAULT_RERANKER_PIPELINE
+    providers = [provider.strip() for provider in raw.split(",") if provider.strip()]
+    if len(providers) < 2:
+        raise ValueError(f"{ENV_RERANKER_PIPELINE} must list at least two providers")
+    stages = []
+    for index, provider in enumerate(providers, start=1):
+        name = f"HINDSIGHT_API_RERANKER_PASS{index}_LIMIT"
+        limit_raw = os.getenv(name)
+        limit = None
+        if limit_raw is not None and limit_raw.strip():
+            try:
+                limit = int(limit_raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer, got {limit_raw!r}") from exc
+            if limit < 1:
+                raise ValueError(f"{name} must be >= 1, got {limit}")
+        member = build_pipeline_stage_member(index, provider, primary)
+        stages.append(RerankerPipelineStage(provider=member.provider, limit=limit, member=member))
+    return stages
+
+
 def _member_str(base: str, suffix: str, default: str) -> str:
     """Read an indexed reranker setting as a string, falling back to ``default``."""
     return os.getenv(base + suffix) or default
@@ -3740,6 +3812,7 @@ class HindsightConfig:
     # members tried, in order, when a member fails. Credential field (members
     # embed api_keys/base_urls).
     reranker_members: list[RerankerMemberConfig] = field(default_factory=list)
+    reranker_pipeline: list[RerankerPipelineStage] | None = field(default=DEFAULT_RERANKER_PIPELINE, kw_only=True)
     bm25_max_query_terms: int = DEFAULT_BM25_MAX_QUERY_TERMS
     bm25_selective_terms: bool = DEFAULT_BM25_SELECTIVE_TERMS
 
@@ -3822,6 +3895,7 @@ class HindsightConfig:
         "mental_model_refresh_llm_members",
         # Reranker failover chain — members embed api_keys and base_urls
         "reranker_members",
+        "reranker_pipeline",
         # Base URLs (could expose infrastructure)
         "llm_base_url",
         "retain_llm_base_url",
@@ -4891,6 +4965,9 @@ class HindsightConfig:
             or os.getenv(ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY),
             reranker_google_timeout=float(os.getenv(ENV_RERANKER_GOOGLE_TIMEOUT, str(DEFAULT_RERANKER_GOOGLE_TIMEOUT))),
             reranker_members=_parse_reranker_members(),
+            # Resolved below from the complete primary. Explicit here also keeps
+            # the dynamic decision-model kwargs from typing this field as a string.
+            reranker_pipeline=None,
             # Decision model
             decision_model_provider=os.getenv(ENV_DECISION_MODEL_PROVIDER) or DEFAULT_DECISION_MODEL_PROVIDER,
             decision_model_api_key=os.getenv(ENV_DECISION_MODEL_API_KEY) or None,
@@ -5462,6 +5539,8 @@ class HindsightConfig:
                 h.lower() for h in _parse_str_list(os.getenv(ENV_EXTENSION_PASSTHROUGH_HEADERS, ""))
             ],
         )
+        if os.getenv(ENV_RERANKER_PIPELINE, "").strip():
+            config.reranker_pipeline = parse_reranker_pipeline(config.reranker_chain()[0])
         config.validate()
         return config
 

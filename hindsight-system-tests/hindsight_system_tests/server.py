@@ -9,13 +9,14 @@ environment variables that any deployment could set.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import socket
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import httpx
@@ -101,6 +102,7 @@ class HindsightServer:
         except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait(timeout=10)
+        _record_process(self._process, url=self.url, log_path=self.log_path, event="stopped")
 
     def logs(self) -> str:
         with contextlib.suppress(OSError):
@@ -215,7 +217,10 @@ def _server_env(stub_url: str, extra_env: dict[str, str] | None) -> dict[str, st
 
     env.update(
         {
-            "HINDSIGHT_API_DATABASE_URL": f"pg0://{PG0_INSTANCE}:{PG0_PORT}",
+            # Opt in only for disposable databases owned by the current test run.
+            "HINDSIGHT_API_DATABASE_URL": os.environ.get(
+                "HINDSIGHT_SYSTEM_TEST_DATABASE_URL", f"pg0://{PG0_INSTANCE}:{PG0_PORT}"
+            ),
             "HINDSIGHT_API_LOG_LEVEL": "info",
             # Everything the server does by default stays on, background work
             # included. A retain enqueues observation extraction and can trigger
@@ -241,18 +246,60 @@ def _start(command: list[str], *, env: dict[str, str], url: str, log_path: Path)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / ".env").write_text("# intentionally empty: see start_hindsight_server\n")
 
+    # A preinstalled project-local venv avoids uv workspace resolution, useful in
+    # source archives with optional workspace members omitted. No ambient PATH
+    # executable is substituted: the caller supplies an explicit bin directory.
+    bin_dir = os.environ.get("HINDSIGHT_SYSTEM_TEST_BIN_DIR")
+    launch = (
+        [str(Path(bin_dir) / command[0]), *command[1:]]
+        if bin_dir
+        else ["uv", "run", "--project", str(API_DIR), *command]
+    )
     log_file = log_path.open("w")
     process = subprocess.Popen(
-        ["uv", "run", "--project", str(API_DIR), *command],
+        launch,
         cwd=run_dir,
         env=env,
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )
 
+    _record_process(process, url=url, log_path=log_path, event="start")
     server = HindsightServer(url=url, log_path=log_path, _process=process)
-    _wait_until_healthy(server)
+    try:
+        _wait_until_healthy(server)
+    except BaseException:
+        server.stop()
+        raise
     return server
+
+
+@dataclass(frozen=True)
+class ProcessEvent:
+    event: str
+    pid: int
+    start_ticks: str | None
+    url: str
+    log_path: str
+    returncode: int | None
+
+
+def _record_process(process: subprocess.Popen, *, url: str, log_path: Path, event: str) -> None:
+    """Optional execution evidence, never used to find or kill other processes."""
+    ledger = os.environ.get("HINDSIGHT_SYSTEM_TEST_RESOURCE_LEDGER")
+    if ledger:
+        stat = Path(f"/proc/{process.pid}/stat")
+        start_ticks = stat.read_text().rsplit(")", 1)[1].split()[19] if stat.exists() else None
+        with Path(ledger).open("a") as stream:
+            record = ProcessEvent(
+                event=event,
+                pid=process.pid,
+                start_ticks=start_ticks,
+                url=url,
+                log_path=str(log_path),
+                returncode=process.poll(),
+            )
+            stream.write(json.dumps(asdict(record)) + "\n")
 
 
 def _wait_until_healthy(server: HindsightServer) -> None:
