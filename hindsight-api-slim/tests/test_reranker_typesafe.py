@@ -52,6 +52,7 @@ class _FakeSession:
 
     @asynccontextmanager
     async def _post(self, url, headers=None, json=None):
+        assert json is not None
         self.urls.append(url)
         self.posted.append(json)
         question_id, question = next(iter(json["questions"].items()))

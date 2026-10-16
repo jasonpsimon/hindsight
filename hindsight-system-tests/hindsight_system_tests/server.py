@@ -221,7 +221,9 @@ def _server_env(stub_url: str, extra_env: dict[str, str] | None) -> dict[str, st
             "HINDSIGHT_API_DATABASE_URL": os.environ.get(
                 "HINDSIGHT_SYSTEM_TEST_DATABASE_URL", f"pg0://{PG0_INSTANCE}:{PG0_PORT}"
             ),
-            "HINDSIGHT_API_LOG_LEVEL": "info",
+            # A story may need production DEBUG telemetry. Keep the database
+            # destination pinned below independently of its logging overrides.
+            "HINDSIGHT_API_LOG_LEVEL": (extra_env or {}).get("HINDSIGHT_API_LOG_LEVEL", "info"),
             # Everything the server does by default stays on, background work
             # included. A retain enqueues observation extraction and can trigger
             # consolidation, and those run in the worker after the request returns

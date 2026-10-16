@@ -30,6 +30,7 @@ class PublicProvider(CrossEncoderModel):
         self.calls.append(list(pairs))
         if self.error is not None:
             raise self.error
+        assert self.scores is not None
         return list(self.scores)
 
 

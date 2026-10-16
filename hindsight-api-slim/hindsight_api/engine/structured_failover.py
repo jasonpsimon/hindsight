@@ -30,8 +30,12 @@ class StructuredMultiCrossEncoder(MultiCrossEncoder):
                 try:
                     pred = await encoder.predict_structured(pairs)
                 except RerankTimeoutError as exc:
+                    served = getattr(exc, "provider_name", None)
                     pred = timeout_to_structured(
-                        exc, len(pairs), member.provider_name, score_kind=getattr(member, "score_kind", None)
+                        exc,
+                        len(pairs),
+                        member.provider_name if served is None else served,
+                        score_kind=getattr(member, "score_kind", None),
                     )
                 if not isinstance(pred, RerankPrediction):
                     raise ValueError("member must return RerankPrediction")
@@ -66,6 +70,7 @@ class StructuredMultiCrossEncoder(MultiCrossEncoder):
             exc.keep = pred.keep
             exc.survivor_order = pred.survivor_order
             exc.score_kind = pred.score_kind
+            exc.timeout_provider = pred.timeout_provider
             raise exc
         return [score if keep and score is not None else 0.0 for score, keep in zip(pred.scores, pred.keep)]
 

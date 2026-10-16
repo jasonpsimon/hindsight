@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -33,7 +34,7 @@ class Native(CrossEncoderModel):
         pass
 
     async def predict_structured(self, pairs: list[tuple[str, str]]) -> RerankPrediction:
-        scores = [0.2, 0.8, 0.4][: len(pairs)]
+        scores: list[float | None] = [0.2, 0.8, 0.4][: len(pairs)]
         if self.outcome != "success":
             raise RerankTimeoutError(scores[:1] if self.outcome == "partial" else scores, 0.0, "offline-model")
         return RerankPrediction(scores, [True] * len(pairs), self.name, self.score_kind)
@@ -177,7 +178,9 @@ async def test_pointwise_kind_overrides_rank_named_backup_after_prediction(
     )
     filtered = await harness.recall()
     assert len(filtered.results) == (0 if outcome == "partial" else 1)
-    assert all(fact.scores.reranker >= 0.6 for fact in filtered.results)
+    for fact in filtered.results:
+        assert fact.scores.reranker is not None
+        assert fact.scores.reranker >= 0.6
 
 
 async def test_configured_rank_primary_floor_is_still_rejected(harness: RecallHarness) -> None:
@@ -247,8 +250,10 @@ async def test_concurrent_recalls_consume_their_own_score_kind(
             return RerankPrediction([0.2, 0.8, 0.4], [True] * 3, "local", kind)
 
     class Interleaved(CrossEncoderReranker):
-        async def rerank(self, query: str, candidates: list[MergedCandidate]) -> RerankResult:
-            result = await super().rerank(query, candidates)
+        async def rerank(
+            self, query: str, candidates: list[MergedCandidate], now: datetime | None = None
+        ) -> RerankResult:
+            result = await super().rerank(query, candidates, now=now)
             if query == first_query:
                 first_ready.set()
                 await second_ready.wait()

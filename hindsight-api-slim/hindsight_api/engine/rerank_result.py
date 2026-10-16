@@ -23,6 +23,9 @@ class RerankPrediction:
     # Original-input indices of every kept candidate, in stable ranking order.
     # Optional so existing native providers retain input-order tie semantics.
     survivor_order: list[int] | None = None
+    # A restored score can come from a different provider than the timeout.
+    # Append metadata to preserve the existing positional constructor contract.
+    timeout_provider: str | None = None
 
 
 def validate_prediction(pred: RerankPrediction, expected_len: int, origin: str) -> None:

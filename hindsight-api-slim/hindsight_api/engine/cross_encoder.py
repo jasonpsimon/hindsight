@@ -96,6 +96,7 @@ class RerankTimeoutError(Exception):
     keep: list[bool] | None = None
     survivor_order: list[int] | None = None
     score_kind: ScoreKind | None = None
+    timeout_provider: str | None = None
 
     def __init__(self, scores: list[float | None], timeout: float, model_name: str):
         self.scores = scores

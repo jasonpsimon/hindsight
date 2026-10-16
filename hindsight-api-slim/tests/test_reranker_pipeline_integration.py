@@ -112,6 +112,7 @@ def test_optional_fields_and_namespace_isolation(monkeypatch):
     monkeypatch.setenv("HINDSIGHT_API_RERANKER_PIPELINE", "rrf,rrf")
     monkeypatch.setenv("HINDSIGHT_RERANKER_PASS1_LIMIT", "1")
     config = HindsightConfig.from_env()
+    assert config.reranker_pipeline is not None
     assert config.reranker_pipeline[0].limit is None
     assert config.reranker_pipeline[0].member.max_tokens_per_candidate is None
     assert config.reranker_pipeline[0].member.cohere_api_key is None
@@ -144,7 +145,9 @@ def test_pass_overrides_every_supported_primary_field(monkeypatch):
         expected[name] = value
         monkeypatch.setenv("HINDSIGHT_API_RERANKER_PASS1_" + name.upper(), text)
     monkeypatch.setenv("HINDSIGHT_API_RERANKER_PIPELINE", "local,rrf")
-    stage = HindsightConfig.from_env().reranker_pipeline[0]
+    pipeline = HindsightConfig.from_env().reranker_pipeline
+    assert pipeline is not None
+    stage = pipeline[0]
     expected["index"] = 1
     assert asdict(stage.member) == expected
     assert stage.provider == "rrf"

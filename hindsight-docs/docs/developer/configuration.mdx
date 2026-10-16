@@ -1329,6 +1329,45 @@ Missing pipeline credentials currently use indexed member error names, such as
 `HINDSIGHT_API_RERANKER_2_TYPESAFE_API_KEY`. Set the corresponding
 `HINDSIGHT_API_RERANKER_PASS2_TYPESAFE_API_KEY` for a pipeline.
 
+##### Stage telemetry and cutoff evaluation
+
+Enable `HINDSIGHT_API_LOG_LEVEL=debug` to emit JSON payloads prefixed with
+`rerank_stage` and `rerank_complete` from `hindsight_api.engine.pipeline_rerank`.
+With application-managed logging, enable DEBUG on that logger and its handler.
+These events contain no query/document text, score arrays or credentials. Other
+DEBUG loggers have their own content policies. Candidate IDs may still identify
+stored records, so restrict access to the logs.
+
+Each pipeline invocation has a fresh `request_id`; the one-based `stage` separates
+repeated providers. `input_ids` follow the actual provider input order.
+`ranked_ids` are ordered survivors after prediction validation and the provider
+keep mask, before the candidate-count `limit`. `output_ids` are the actual survivors
+after that limit. `provider_pruned_ids` and `unscored_ids` distinguish rejection
+from missing timeout scores. Parallel index lists identify original input
+positions, including repeated IDs or duplicate text. Recall supplies persistent
+memory IDs with `identity_scope=memory_id`. Direct pair-based calls use original
+positions as strings with `identity_scope=input_index`, not database identities.
+
+`latency_ms` measures monotonic elapsed milliseconds from the provider invocation
+through validation, ordering and the stage cut. It includes backend retries and
+token handling, but excludes model initialization and downstream recall scoring.
+The completion event identifies the final order and whether earlier scores were
+restored. Its `score_provider`/`score_kind` describe those scores;
+`timeout_provider`/`timeout_seconds` describe the final timed-out pass. An ordinary
+provider error or cancellation emits `rerank_stage_failed` with an exception class
+and elapsed time, never the exception body, then propagates without restoration.
+
+Evaluate each cutoff against independently labeled initial/global gold IDs.
+`hindsight_dev.rerank_eval.evaluate_rerank_cutoff` reports input coverage, recall
+after provider pruning but before the limit, recall after the limit, and separate
+gold losses from pruning and the limit. Keep the same gold set for every stage;
+shrinking it would hide earlier losses. Repeated IDs count once; distinct IDs with
+duplicate text remain distinct. Empty gold sets have preservation recall 1.0.
+The report's `require_recall` guard raises when post-cut recall is below a preset
+minimum. Labels, model/data revisions, candidate selection, limits and thresholds
+must be fixed before evaluating. No pipeline limit guarantees relevance
+preservation; a later model cannot rescue an earlier discarded candidate.
+
 #### Reranker failover chain
 
 Reranking is a refinement stage, but by default a reranker that is unreachable takes
@@ -1596,12 +1635,11 @@ export HINDSIGHT_API_CONSOLIDATION_DECISION_MODEL_API_KEY=your-openai-key
 ```
 
 **Recall.** With a decision model, recall uses it in place of the [reranker](#reranker).
-It asks of each candidate whether showing it would help answer the question, and orders
-the pool by that. Then, on questions that ask for a value (a date, a count, a version), it
-asks which of the candidates that disagree states the current answer, and drops the
-out-of-date ones when the verdict is confident. That order is final: recall skips the
-recency, temporal and proof-count boosts it applies to a cross-encoder, and publishes no
-reranker score, so `min_scores.reranker` is rejected. To keep the cross-encoder for recall
+It asks of each candidate whether showing it would help answer the question, telling it
+the date the question is asked (the recall's question date, else today), and orders the
+pool by that. That order is final: recall skips the recency, temporal and proof-count
+boosts it applies to a cross-encoder, and publishes no reranker score, so
+`min_scores.reranker` is rejected. To keep the cross-encoder for recall
 while other operations use the decision model, set
 `HINDSIGHT_API_RECALL_DECISION_MODEL_PROVIDER=none`.
 

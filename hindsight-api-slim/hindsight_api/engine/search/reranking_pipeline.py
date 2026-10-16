@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from ..cross_encoder import RerankTimeoutError, _served_provider
 from ..pipeline_rerank import timeout_to_structured
 from ..rerank_result import RerankPrediction, stable_sigmoid, validate_prediction
+from ..rerank_telemetry import rerank_candidate_ids
 from .types import MergedCandidate, ScoredResult
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ async def rerank_with_structured(
     from .reranking import RerankResult
 
     token = _served_provider.set(None)
+    identity_token = rerank_candidate_ids.set(tuple(candidate.id for candidate in candidates))
     try:
         try:
             pred = await cross_encoder.predict_structured(pairs)
@@ -36,6 +38,7 @@ async def rerank_with_structured(
         if served is None:
             served = _served_provider.get()
     finally:
+        rerank_candidate_ids.reset(identity_token)
         _served_provider.reset(token)
     if served is None:
         served = cross_encoder.provider_name
